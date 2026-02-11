@@ -1,6 +1,7 @@
 {
-  "name": "sanyastail",
-  "version": "2.0.0",
+  "name": "spectr-messenger",
+  "version": "1.0.0",
+  "description": "Современный мессенджер СПЕКТР с красивым дизайном",
   "main": "index.js",
   "scripts": {
     "start": "node index.js"
