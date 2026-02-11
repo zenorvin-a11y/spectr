@@ -15,7 +15,7 @@ const server = http.createServer(app);
 const io = socketIo(server);
 
 // ========== НАСТРОЙКИ ==========
-const GOOGLE_CLIENT_ID = 'ТВОЙ_CLIENT_ID';
+const GOOGLE_CLIENT_ID = 'zenorvin@gmail.com';
 const GOOGLE_CLIENT_SECRET = 'ТВОЙ_CLIENT_SECRET';
 const ADMIN_EMAIL = 'твоя_почта@gmail.com'; // Куда приходят жалобы
 const EMAIL_PASSWORD = 'пароль_приложения'; // Пароль приложения Gmail
