@@ -1,3 +1,4 @@
+// ===================== НАСТРОЙКА =====================
 const express = require('express');
 const session = require('express-session');
 const passport = require('passport');
@@ -5,337 +6,339 @@ const GoogleStrategy = require('passport-google-oauth20').Strategy;
 const http = require('http');
 const socketIo = require('socket.io');
 const multer = require('multer');
+const nodemailer = require('nodemailer');
+const sqlite3 = require('sqlite3').verbose();
 const path = require('path');
 const fs = require('fs');
-const nodemailer = require('nodemailer');
-const { initDB, getDB } = require('./database');
+const bcrypt = require('bcryptjs');
 
 const app = express();
 const server = http.createServer(app);
 const io = socketIo(server);
 
-// ========== НАСТРОЙКИ ==========
-const GOOGLE_CLIENT_ID = 'zenorvin@gmail.com';
-const GOOGLE_CLIENT_SECRET = 'ТВОЙ_CLIENT_SECRET';
-const ADMIN_EMAIL = 'твоя_почта@gmail.com'; // Куда приходят жалобы
-const EMAIL_PASSWORD = 'пароль_приложения'; // Пароль приложения Gmail
-
-// Инициализация БД
-initDB();
-
 // Настройка загрузки файлов
 const storage = multer.diskStorage({
-  destination: './uploads/',
+  destination: 'public/uploads/',
   filename: (req, file, cb) => {
-    cb(null, Date.now() + path.extname(file.originalname));
+    cb(null, Date.now() + '-' + file.originalname);
   }
 });
 const upload = multer({ storage });
 
-// Настройка почты
-const transporter = nodemailer.createTransport({
+// Настройка почты для жалоб
+const mailTransporter = nodemailer.createTransport({
   service: 'gmail',
   auth: {
-    user: ADMIN_EMAIL,
-    pass: EMAIL_PASSWORD
+    user: process.env.ADMIN_EMAIL,
+    pass: process.env.ADMIN_EMAIL_PASSWORD
   }
 });
 
-// Сессии
-app.use(session({
-  secret: 'spectr-mega-secret-' + Date.now(),
-  resave: false,
-  saveUninitialized: true
-}));
+// База данных SQLite
+const db = new sqlite3.Database('spectr.db');
 
-app.use(passport.initialize());
-app.use(passport.session());
+// Создание таблиц
+db.serialize(() => {
+  db.run(`
+    CREATE TABLE IF NOT EXISTS users (
+      id TEXT PRIMARY KEY,
+      googleId TEXT UNIQUE,
+      email TEXT UNIQUE,
+      name TEXT,
+      avatar TEXT,
+      isAdmin INTEGER DEFAULT 0,
+      createdAt DATETIME DEFAULT CURRENT_TIMESTAMP
+    )
+  `);
+  
+  db.run(`
+    CREATE TABLE IF NOT EXISTS contacts (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      userId TEXT,
+      contactId TEXT,
+      nickname TEXT,
+      FOREIGN KEY (userId) REFERENCES users (id),
+      FOREIGN KEY (contactId) REFERENCES users (id)
+    )
+  `);
+  
+  db.run(`
+    CREATE TABLE IF NOT EXISTS chats (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      type TEXT, -- 'private', 'group', 'channel'
+      name TEXT,
+      avatar TEXT,
+      createdBy TEXT,
+      createdAt DATETIME DEFAULT CURRENT_TIMESTAMP
+    )
+  `);
+  
+  db.run(`
+    CREATE TABLE IF NOT EXISTS chat_members (
+      chatId INTEGER,
+      userId TEXT,
+      role TEXT DEFAULT 'member', -- 'member', 'admin', 'owner'
+      joinedAt DATETIME DEFAULT CURRENT_TIMESTAMP,
+      FOREIGN KEY (chatId) REFERENCES chats (id),
+      FOREIGN KEY (userId) REFERENCES users (id)
+    )
+  `);
+  
+  db.run(`
+    CREATE TABLE IF NOT EXISTS messages (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      chatId INTEGER,
+      userId TEXT,
+      type TEXT DEFAULT 'text', -- 'text', 'image', 'video', 'file'
+      content TEXT,
+      fileUrl TEXT,
+      timestamp DATETIME DEFAULT CURRENT_TIMESTAMP,
+      FOREIGN KEY (chatId) REFERENCES chats (id),
+      FOREIGN KEY (userId) REFERENCES users (id)
+    )
+  `);
+  
+  db.run(`
+    CREATE TABLE IF NOT EXISTS reports (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      reporterId TEXT,
+      reportedUserId TEXT,
+      chatId INTEGER,
+      reason TEXT,
+      status TEXT DEFAULT 'pending',
+      createdAt DATETIME DEFAULT CURRENT_TIMESTAMP,
+      FOREIGN KEY (reporterId) REFERENCES users (id),
+      FOREIGN KEY (reportedUserId) REFERENCES users (id)
+    )
+  `);
+});
 
-// Google OAuth
+// ===================== ПАСПОРТ =====================
 passport.use(new GoogleStrategy({
-    clientID: GOOGLE_CLIENT_ID,
-    clientSecret: GOOGLE_CLIENT_SECRET,
-    callbackURL: 'https://sanyastail.onrender.com/auth/google/callback'
+    clientID: process.env.GOOGLE_CLIENT_ID,
+    clientSecret: process.env.GOOGLE_CLIENT_SECRET,
+    callbackURL: process.env.DOMAIN + '/auth/google/callback'
   },
   async (accessToken, refreshToken, profile, done) => {
     try {
-      const db = getDB();
-      
-      // Проверяем есть ли пользователь
-      let user = await db.get('SELECT * FROM users WHERE google_id = ?', profile.id);
-      
-      if (!user) {
-        // Создаём нового
-        await db.run(
-          'INSERT INTO users (id, google_id, email, name, avatar) VALUES (?, ?, ?, ?, ?)',
-          Date.now().toString(),
-          profile.id,
-          profile.emails[0].value,
-          profile.displayName,
-          profile.photos[0].value
-        );
-        
-        user = await db.get('SELECT * FROM users WHERE google_id = ?', profile.id);
-      }
-      
-      return done(null, user);
+      // Сохраняем пользователя в БД
+      db.get('SELECT * FROM users WHERE googleId = ?', [profile.id], (err, user) => {
+        if (!user) {
+          db.run(
+            'INSERT INTO users (id, googleId, email, name, avatar, isAdmin) VALUES (?, ?, ?, ?, ?, ?)',
+            [Date.now().toString(), profile.id, profile.emails[0].value, profile.displayName, profile.photos[0].value, 0]
+          );
+        }
+        done(null, profile);
+      });
     } catch (error) {
-      return done(error);
+      done(error);
     }
   }
 ));
 
-passport.serializeUser((user, done) => done(null, user.id));
-passport.deserializeUser(async (id, done) => {
-  try {
-    const db = getDB();
-    const user = await db.get('SELECT * FROM users WHERE id = ?', id);
-    done(null, user);
-  } catch (error) {
-    done(error);
-  }
-});
+passport.serializeUser((user, done) => done(null, user));
+passport.deserializeUser((user, done) => done(null, user));
 
-// Статические файлы
-app.use('/uploads', express.static('uploads'));
+// ===================== MIDDLEWARE =====================
 app.use(express.static('public'));
+app.use(express.json());
+app.use(express.urlencoded({ extended: true }));
+app.use(session({
+  secret: process.env.SESSION_SECRET || 'secret',
+  resave: false,
+  saveUninitialized: true
+}));
+app.use(passport.initialize());
+app.use(passport.session());
 
-// ========== API РОУТЫ ==========
+// ===================== РОУТЫ =====================
 
 // Главная страница
 app.get('/', (req, res) => {
   if (req.isAuthenticated()) {
-    res.sendFile(__dirname + '/public/app.html');
+    res.sendFile(__dirname + '/views/dashboard.html');
   } else {
-    res.sendFile(__dirname + '/public/login.html');
+    res.sendFile(__dirname + '/views/login.html');
   }
 });
 
-// Google аутентификация
-app.get('/auth/google',
-  passport.authenticate('google', { scope: ['profile', 'email'] })
-);
+// Google OAuth
+app.get('/auth/google', passport.authenticate('google', { scope: ['profile', 'email'] }));
+app.get('/auth/google/callback', passport.authenticate('google', { failureRedirect: '/' }), (req, res) => res.redirect('/'));
+app.get('/logout', (req, res) => { req.logout(() => res.redirect('/')); });
 
-app.get('/auth/google/callback',
-  passport.authenticate('google', { failureRedirect: '/' }),
-  (req, res) => res.redirect('/')
-);
-
-app.get('/logout', (req, res) => {
-  req.logout(() => res.redirect('/'));
+// API для получения данных
+app.get('/api/user', (req, res) => {
+  if (!req.isAuthenticated()) return res.status(401).json({ error: 'Not authenticated' });
+  res.json(req.user);
 });
 
-// API: Получить контакты
-app.get('/api/contacts', async (req, res) => {
-  if (!req.isAuthenticated()) return res.status(401).json({ error: 'Не авторизован' });
+app.get('/api/contacts', (req, res) => {
+  if (!req.isAuthenticated()) return res.status(401).json({ error: 'Not authenticated' });
   
-  try {
-    const db = getDB();
-    const contacts = await db.all(`
-      SELECT u.*, c.status 
-      FROM contacts c
-      JOIN users u ON u.id = c.contact_id
-      WHERE c.user_id = ? AND c.status = 'accepted'
-    `, req.user.id);
-    
-    res.json(contacts);
-  } catch (error) {
-    res.status(500).json({ error: error.message });
-  }
-});
-
-// API: Добавить контакт
-app.post('/api/contacts/add', async (req, res) => {
-  if (!req.isAuthenticated()) return res.status(401).json({ error: 'Не авторизован' });
-  
-  try {
-    const db = getDB();
-    const { email } = req.body;
-    
-    // Находим пользователя по email
-    const contact = await db.get('SELECT * FROM users WHERE email = ?', email);
-    if (!contact) return res.status(404).json({ error: 'Пользователь не найден' });
-    
-    // Проверяем нет ли уже контакта
-    const existing = await db.get(
-      'SELECT * FROM contacts WHERE user_id = ? AND contact_id = ?',
-      req.user.id, contact.id
-    );
-    
-    if (!existing) {
-      await db.run(
-        'INSERT INTO contacts (user_id, contact_id, status) VALUES (?, ?, ?)',
-        req.user.id, contact.id, 'pending'
-      );
-      
-      // Уведомление в реальном времени
-      io.to(contact.id).emit('contact_request', {
-        from: req.user,
-        to: contact
-      });
-    }
-    
-    res.json({ success: true });
-  } catch (error) {
-    res.status(500).json({ error: error.message });
-  }
-});
-
-// API: Создать чат
-app.post('/api/chats/create', async (req, res) => {
-  if (!req.isAuthenticated()) return res.status(401).json({ error: 'Не авторизован' });
-  
-  try {
-    const db = getDB();
-    const { name, type, members } = req.body;
-    
-    // Создаём чат
-    const result = await db.run(
-      'INSERT INTO chats (name, type, created_by) VALUES (?, ?, ?)',
-      name, type || 'group', req.user.id
-    );
-    
-    const chatId = result.lastID;
-    
-    // Добавляем создателя как админа
-    await db.run(
-      'INSERT INTO chat_members (chat_id, user_id, role) VALUES (?, ?, ?)',
-      chatId, req.user.id, 'admin'
-    );
-    
-    // Добавляем участников
-    for (const memberId of members) {
-      await db.run(
-        'INSERT INTO chat_members (chat_id, user_id) VALUES (?, ?)',
-        chatId, memberId
-      );
-      
-      // Уведомляем участников
-      io.to(memberId).emit('chat_invite', {
-        chatId,
-        name,
-        inviter: req.user
-      });
-    }
-    
-    res.json({ success: true, chatId });
-  } catch (error) {
-    res.status(500).json({ error: error.message });
-  }
-});
-
-// API: Отправить жалобу
-app.post('/api/report', async (req, res) => {
-  if (!req.isAuthenticated()) return res.status(401).json({ error: 'Не авторизован' });
-  
-  try {
-    const db = getDB();
-    const { targetId, reason } = req.body;
-    
-    // Сохраняем в БД
-    await db.run(
-      'INSERT INTO reports (reporter_id, target_id, reason) VALUES (?, ?, ?)',
-      req.user.id, targetId, reason
-    );
-    
-    // Отправляем email администратору
-    const targetUser = await db.get('SELECT * FROM users WHERE id = ?', targetId);
-    
-    await transporter.sendMail({
-      from: ADMIN_EMAIL,
-      to: ADMIN_EMAIL,
-      subject: '🚨 ЖАЛОБА в SPECTR',
-      html: `
-        <h1>Новая жалоба</h1>
-        <p><strong>От:</strong> ${req.user.name} (${req.user.email})</p>
-        <p><strong>На:</strong> ${targetUser.name} (${targetUser.email})</p>
-        <p><strong>Причина:</strong> ${reason}</p>
-        <p><strong>Дата:</strong> ${new Date().toLocaleString()}</p>
-      `
-    });
-    
-    res.json({ success: true });
-  } catch (error) {
-    res.status(500).json({ error: error.message });
-  }
-});
-
-// API: Загрузить файл
-app.post('/api/upload', upload.single('file'), (req, res) => {
-  if (!req.isAuthenticated()) return res.status(401).json({ error: 'Не авторизован' });
-  
-  res.json({
-    success: true,
-    url: `/uploads/${req.file.filename}`,
-    type: req.file.mimetype.split('/')[0] // image/video
+  db.all(`
+    SELECT u.*, c.nickname 
+    FROM contacts c 
+    JOIN users u ON c.contactId = u.googleId 
+    WHERE c.userId = ?
+  `, [req.user.id], (err, contacts) => {
+    res.json(contacts || []);
   });
 });
 
-// ========== WEBSOCKET ==========
+app.get('/api/chats', (req, res) => {
+  if (!req.isAuthenticated()) return res.status(401).json({ error: 'Not authenticated' });
+  
+  db.all(`
+    SELECT c.*, cm.role 
+    FROM chats c
+    JOIN chat_members cm ON c.id = cm.chatId
+    WHERE cm.userId = ?
+    ORDER BY c.createdAt DESC
+  `, [req.user.id], (err, chats) => {
+    res.json(chats || []);
+  });
+});
 
+// Добавление контакта
+app.post('/api/contacts/add', (req, res) => {
+  if (!req.isAuthenticated()) return res.status(401).json({ error: 'Not authenticated' });
+  
+  const { email, nickname } = req.body;
+  
+  db.get('SELECT * FROM users WHERE email = ?', [email], (err, user) => {
+    if (!user) return res.status(404).json({ error: 'User not found' });
+    
+    db.run(
+      'INSERT INTO contacts (userId, contactId, nickname) VALUES (?, ?, ?)',
+      [req.user.id, user.googleId, nickname || user.name]
+    );
+    
+    res.json({ success: true, user });
+  });
+});
+
+// Создание группового чата
+app.post('/api/chats/create-group', (req, res) => {
+  if (!req.isAuthenticated()) return res.status(401).json({ error: 'Not authenticated' });
+  
+  const { name, userIds } = req.body;
+  const chatId = Date.now();
+  
+  db.run(
+    'INSERT INTO chats (id, type, name, createdBy) VALUES (?, ?, ?, ?)',
+    [chatId, 'group', name, req.user.id],
+    function() {
+      // Добавляем создателя как владельца
+      db.run('INSERT INTO chat_members (chatId, userId, role) VALUES (?, ?, ?)', [chatId, req.user.id, 'owner']);
+      
+      // Добавляем участников
+      userIds.forEach(userId => {
+        db.run('INSERT INTO chat_members (chatId, userId, role) VALUES (?, ?, ?)', [chatId, userId, 'member']);
+      });
+      
+      res.json({ success: true, chatId });
+    }
+  );
+});
+
+// Загрузка файлов
+app.post('/api/upload', upload.single('file'), (req, res) => {
+  if (!req.isAuthenticated()) return res.status(401).json({ error: 'Not authenticated' });
+  
+  const fileUrl = `/uploads/${req.file.filename}`;
+  res.json({ url: fileUrl });
+});
+
+// Отправка жалобы
+app.post('/api/report', async (req, res) => {
+  if (!req.isAuthenticated()) return res.status(401).json({ error: 'Not authenticated' });
+  
+  const { reportedUserId, chatId, reason } = req.body;
+  
+  // Сохраняем в БД
+  db.run(
+    'INSERT INTO reports (reporterId, reportedUserId, chatId, reason) VALUES (?, ?, ?, ?)',
+    [req.user.id, reportedUserId, chatId, reason]
+  );
+  
+  // Отправляем на почту
+  const mailOptions = {
+    from: process.env.ADMIN_EMAIL,
+    to: process.env.ADMIN_EMAIL,
+    subject: '🚨 Новая жалоба в СПЕКТР',
+    html: `
+      <h2>Новая жалоба</h2>
+      <p><strong>От:</strong> ${req.user.displayName} (${req.user.emails[0].value})</p>
+      <p><strong>На пользователя:</strong> ${reportedUserId}</p>
+      <p><strong>Чат:</strong> ${chatId}</p>
+      <p><strong>Причина:</strong> ${reason}</p>
+      <p><strong>Время:</strong> ${new Date().toLocaleString()}</p>
+    `
+  };
+  
+  try {
+    await mailTransporter.sendMail(mailOptions);
+    res.json({ success: true });
+  } catch (error) {
+    console.error('Ошибка отправки почты:', error);
+    res.status(500).json({ error: 'Failed to send report' });
+  }
+});
+
+// ===================== WEBSOCKET =====================
 io.on('connection', (socket) => {
   console.log('Новое подключение:', socket.id);
   
-  // Привязываем socket к пользователю
-  socket.on('identify', (userId) => {
-    socket.join(userId);
-    socket.userId = userId;
-    
-    // Уведомляем о онлайн статусе
-    socket.broadcast.emit('user_online', userId);
+  socket.on('join_chat', (chatId) => {
+    socket.join('chat_' + chatId);
   });
   
-  // Отправка сообщения
   socket.on('send_message', async (data) => {
-    try {
-      const db = getDB();
-      
-      // Сохраняем в БД
-      const result = await db.run(
-        'INSERT INTO messages (chat_id, user_id, content, type, file_url) VALUES (?, ?, ?, ?, ?)',
-        data.chatId, data.userId, data.content, data.type, data.fileUrl
-      );
-      
-      const messageId = result.lastID;
-      
-      // Получаем полное сообщение
-      const message = await db.get(`
-        SELECT m.*, u.name, u.avatar 
-        FROM messages m
-        JOIN users u ON u.id = m.user_id
-        WHERE m.id = ?
-      `, messageId);
-      
-      // Получаем участников чата
-      const members = await db.all(
-        'SELECT user_id FROM chat_members WHERE chat_id = ?',
-        data.chatId
-      );
-      
-      // Отправляем всем участникам
-      members.forEach(member => {
-        io.to(member.user_id).emit('new_message', message);
-      });
-      
-    } catch (error) {
-      console.error('Ошибка отправки сообщения:', error);
-    }
+    const { chatId, type, content, fileUrl } = data;
+    const userId = socket.request.session.passport?.user?.id;
+    
+    if (!userId) return;
+    
+    // Сохраняем в БД
+    db.run(
+      'INSERT INTO messages (chatId, userId, type, content, fileUrl) VALUES (?, ?, ?, ?, ?)',
+      [chatId, userId, type, content, fileUrl],
+      function() {
+        const message = {
+          id: this.lastID,
+          chatId,
+          userId,
+          type,
+          content,
+          fileUrl,
+          timestamp: new Date().toISOString(),
+          user: socket.request.session.passport?.user
+        };
+        
+        // Отправляем всем в чате
+        io.to('chat_' + chatId).emit('new_message', message);
+      }
+    );
   });
   
-  socket.on('disconnect', () => {
-    if (socket.userId) {
-      // Уведомляем о оффлайн статусе
-      socket.broadcast.emit('user_offline', socket.userId);
-    }
+  socket.on('typing', (data) => {
+    socket.to('chat_' + data.chatId).emit('user_typing', {
+      userId: socket.request.session.passport?.user?.id,
+      name: socket.request.session.passport?.user?.displayName
+    });
   });
 });
 
-// Создаём папку для загрузок
-if (!fs.existsSync('./uploads')) {
-  fs.mkdirSync('./uploads');
-}
-
+// ===================== ЗАПУСК СЕРВЕРА =====================
 const PORT = process.env.PORT || 3000;
 server.listen(PORT, () => {
-  console.log(`🚀 SPECTR SOCIAL запущен на порту ${PORT}`);
+  console.log(`🌈 СПЕКТР Социальная Сеть запущена!`);
+  console.log(`👉 ${process.env.DOMAIN || `http://localhost:${PORT}`}`);
+  
+  // Создаём папку для загрузок
+  if (!fs.existsSync('public/uploads')) {
+    fs.mkdirSync('public/uploads', { recursive: true });
+  }
 });
