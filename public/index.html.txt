@@ -1,0 +1,87 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>🌈 СПЕКТР ПРО</title>
+    <style>
+        body { margin: 0; font-family: Arial; background: #000; color: #0f0; }
+        .container { display: flex; height: 100vh; }
+        .sidebar { width: 300px; background: #111; padding: 20px; }
+        .main { flex: 1; padding: 20px; }
+        .tab { padding: 10px; margin: 5px; background: #222; cursor: pointer; }
+        .active { background: #0a0; }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="sidebar">
+            <h2>🌈 СПЕКТР ПРО</h2>
+            <div class="tab active" onclick="showTab('chats')">💬 Чаты</div>
+            <div class="tab" onclick="showTab('contacts')">👥 Контакты</div>
+            <div class="tab" onclick="showTab('groups')">👑 Группы</div>
+            <div class="tab" onclick="showTab('channels')">📢 Каналы</div>
+            <div class="tab" onclick="showTab('report')">🚨 Жалоба</div>
+        </div>
+        <div class="main" id="content">
+            <!-- Контент будет здесь -->
+        </div>
+    </div>
+    
+    <script src="/socket.io/socket.io.js"></script>
+    <script>
+        const socket = io();
+        let currentUser = null;
+        
+        // Регистрация
+        const username = prompt('Введи имя:') || 'User' + Math.random().toString(36).substr(2, 5);
+        socket.emit('register', { username, avatar: '👤' });
+        
+        socket.on('registered', (data) => {
+            currentUser = data;
+            showTab('chats');
+        });
+        
+        // Переключение вкладок
+        function showTab(tab) {
+            document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
+            event.target.classList.add('active');
+            
+            let content = '';
+            if (tab === 'chats') content = '<h3>💬 Личные чаты</h3><p>Выбери контакт для общения</p>';
+            if (tab === 'contacts') content = '<h3>👥 Контакты</h3><input placeholder="Добавить контакт..."><button>Добавить</button>';
+            if (tab === 'groups') content = '<h3>👑 Группы</h3><button>Создать группу</button>';
+            if (tab === 'channels') content = '<h3>📢 Каналы</h3><button>Создать канал</button>';
+            if (tab === 'report') content = `
+                <h3>🚨 Отправить жалобу</h3>
+                <textarea id="reportText" placeholder="Опишите проблему..." rows="5"></textarea><br>
+                <button onclick="sendReport()">Отправить на почту</button>
+            `;
+            
+            document.getElementById('content').innerHTML = content;
+        }
+        
+        // Отправка жалобы
+        function sendReport() {
+            const text = document.getElementById('reportText').value;
+            fetch('/report', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({ details: text })
+            }).then(() => alert('Жалоба отправлена!'));
+        }
+        
+        // Загрузка файла
+        function uploadFile() {
+            const input = document.createElement('input');
+            input.type = 'file';
+            input.onchange = (e) => {
+                const formData = new FormData();
+                formData.append('file', e.target.files[0]);
+                fetch('/upload', { method: 'POST', body: formData })
+                    .then(res => res.json())
+                    .then(data => console.log('Файл загружен:', data.url));
+            };
+            input.click();
+        }
+    </script>
+</body>
+</html>
